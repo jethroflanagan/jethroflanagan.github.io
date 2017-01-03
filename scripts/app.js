@@ -1013,7 +1013,7 @@ var AssetLoader = Vue.component('asset-loader', {
                 if (cb) cb();
                 deferred.resolve(img);
             }.bind(this), false);
-            img.src = '/images/' + path;
+            img.src = './images/' + path;
             return deferred.promise;
         },
 
