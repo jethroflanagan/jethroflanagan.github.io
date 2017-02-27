@@ -5,13 +5,26 @@ var _aggregate = {};
 var _groups = {};
 
 var aggregateService = {
-    load: function load() {
-        return $.getJSON('data/aggregate.json').success(function (res) {
-            console.log('Loaded', res);
-            _.merge(_aggregate, res);
-        }).error(function (err) {
-            console.log('Whoops', err);
-        });
+    load: function load(el) {
+        return {
+            // setup like getJSON from jquery
+            success: function success(cb) {
+                el.addEventListener('data', function (res) {
+                    console.log('data', res);
+                    _.merge(_aggregate, res.detail);
+                    cb();
+                });
+            }
+        };
+        // window.addEventListener
+        // return $.getJSON('data/aggregate.json')
+        //     .success((res) => {
+        //         console.log('Loaded',res);
+        //         _.merge(_aggregate, res);
+        //     })
+        //     .error((err) => {
+        //         console.log('Whoops', err);
+        //     });
     },
     // data: aggregate,
     get data() {
@@ -23,6 +36,54 @@ var aggregateService = {
     // calculate
 
 };
+
+var formatNumber = function formatNumber(value) {
+    if (typeof value === 'undefined') return 0;
+    value = Math.round(value);
+    return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+};
+
+Vue.filter('number', function (value) {
+    return formatNumber(value);
+});
+
+Vue.filter('currency', function (value) {
+    return 'R' + formatNumber(value);
+});
+
+Vue.filter('date', function (value) {
+    return moment(value).format('D MMMM YYYY');
+});
+Vue.filter('dateAgo', function (value, hideAgo) {
+    return moment(value).fromNow(hideAgo);
+});
+
+//
+Vue.filter('fuzzyDatePeriod', function (value, periodType) {
+    var response = '';
+    switch (periodType) {
+        case 'year':
+        case 'years':
+        case 'y':
+            var years = Math.floor(value);
+            var months = Math.round((value - years) * 12);
+
+            if (years > 0) {
+                response += years + ' year' + (years !== 1 ? 's' : '');
+            }
+            if (months > 0) {
+                if (years > 0) {
+                    response += ' and ';
+                }
+                response += months + ' month' + (months !== 1 ? 's' : '');
+            }
+            // response = response.replace(/ /g, '&nbsp;');
+            return response;
+            break;
+    }
+});
+
+// export {};
 
 function Painter(opts) {
     var outputCtx = opts.outputCtx;
@@ -64,6 +125,7 @@ function Painter(opts) {
 
         // Written as a promise chain to support Firefox and Safari doing async saving of the canvas
         paint: function paint(brush, onComplete) {
+            var savedOptions = {};
             var ctx = this.addCanvas();
             this.reset(ctx);
 
@@ -80,7 +142,8 @@ function Painter(opts) {
             var y = brush.cy - radius;
             var hueShift = brush.hueShift;
 
-            var brushIndex = Math.floor(Math.random() * brushMasks.length);
+            var brushIndex = brush.brushIndex || Math.floor(Math.random() * brushMasks.length);
+            savedOptions.brushIndex = brushIndex;
 
             // var invertedMask = brush.invertedMask;
             var colorTheme = brush.colorTheme;
@@ -119,9 +182,18 @@ function Painter(opts) {
                 }
                 // color
                 ctx.globalCompositeOperation = 'source-atop';
-                // var scale = 1.5;
-                var colorX = /*-x * scale;//*/-Math.random() * (colorTheme.naturalWidth - brushWidth) + brushOffset.x;
-                var colorY = /*-y * scale;//*/-Math.random() * (colorTheme.naturalHeight - brushHeight) + brushOffset.y;
+
+                var colorX = brush.colorX || -Math.random() * (colorTheme.naturalWidth - brushWidth) + brushOffset.x;
+                var colorY = brush.colorY || -Math.random() * (colorTheme.naturalHeight - brushHeight) + brushOffset.y;
+
+                // repainting with old colors, but resizing bigger can make it go off canvas
+                if (brush.colorX) {
+                    colorX = Math.min(0, Math.max(colorX, -(colorTheme.naturalWidth - brushWidth) + brushOffset.x));
+                    colorY = Math.min(0, Math.max(colorY, -(colorTheme.naturalHeight - brushHeight) + brushOffset.y));
+                }
+
+                savedOptions.colorX = colorX;
+                savedOptions.colorY = colorY;
 
                 ctx.drawImage(colorTheme, colorX, colorY, colorTheme.naturalWidth, colorTheme.naturalHeight);
                 ctx.globalCompositeOperation = 'source-over';
@@ -172,7 +244,7 @@ function Painter(opts) {
                 composite = layer;
 
                 this.reset(ctx);
-                this.paintRotated(ctx, composite);
+                savedOptions.brushAngle = this.paintRotated(ctx, composite, brush.brushAngle);
                 return this.saveLayer(ctx);
             }.bind(this))
 
@@ -191,22 +263,25 @@ function Painter(opts) {
                     onComplete();
                 }
                 this.removeCanvas(ctx);
-            }.bind(this)).catch(function (e) {
+            }.bind(this)).then(function () {
+                return savedOptions;
+            }).catch(function (e) {
                 console.error(e);
             });
         },
 
-        paintRotated: function paintRotated(ctx, img) {
+        paintRotated: function paintRotated(ctx, img, brushAngle) {
             var canvasWidth = ctx.canvas.width;
             var canvasHeight = ctx.canvas.height;
             ctx.save();
-            var angle = Math.random() * 2;
+            var angle = brushAngle || Math.random() * Math.PI * 2;
 
             ctx.translate(canvasWidth / 2, canvasHeight / 2);
             ctx.rotate(angle);
             ctx.drawImage(img, -canvasWidth / 2, -canvasHeight / 2, canvasWidth, canvasHeight);
 
             ctx.restore();
+            return angle;
         },
 
         paintEdge: function paintEdge(ctx, invertedMask) {
@@ -229,16 +304,18 @@ function Painter(opts) {
         },
 
         saveLayer: function saveLayer(ctx, onSaved) {
-            var deferred = Q.defer();
             var layer = document.createElement('img');
             // document.querySelector('body').appendChild(layer);
-            layer.onload = function () {
-                deferred.resolve(layer);
-                // onSaved(layer);
-            };
+            var deferred = function (resolve, reject) {
+                layer.onload = function () {
+                    resolve(layer);
+                    // onSaved(layer);
+                };
+            }.bind(this);
+            var promise = new Promise(deferred);
             layer.src = ctx.canvas.toDataURL('image/png');
 
-            return deferred.promise;
+            return promise;
         },
 
         reset: function reset(ctx) {
@@ -315,7 +392,7 @@ function Labeler(opts) {
             var y = Math.round(opts.y + Math.random() * variation - variation / 2 + yOffset);
 
             var label = this.addLayer(null, 'Label');
-            var isFlipped = x > canvasWidth / 2;
+            var isFlipped = x > canvasWidth / 2 * opts.scale;
             label.setAttribute('style', ['left:' + x + 'px', 'top:' + y + 'px'].join(';'));
 
             var labelContainer = this.addLayer(label, 'Label-rotate');
@@ -323,9 +400,16 @@ function Labeler(opts) {
 
             var labelBackground = this.addLayer(labelContainer, 'LabelText-background' + (isFlipped ? ' LabelText-background--flip' : ''));
 
-            var labelText = this.addLayer(labelContainer, 'LabelText' + (isFlipped ? ' LabelText--flip' : ''));
+            var hasGroupList = group.contains;
+            if (hasGroupList && group.contains.length === 1 && group.contains[0] === group.name) {
+                hasGroupList = false;
+            }
+            var labelText = this.addLayer(labelContainer, 'LabelText' + (isFlipped ? ' LabelText--flip' : '') + (hasGroupList ? ' LabelText--grouped' : ''));
 
             this.addLayer(labelText, 'LabelText-name', group.name);
+            if (hasGroupList) {
+                this.addLayer(labelText, 'LabelText-groups', group.contains.join(', '));
+            }
 
             var percent = Math.round(group.percent);
             if (percent === 0) {
@@ -441,13 +525,12 @@ var Options = Vue.component('text-input', {
 
 var PaintControls = Vue.component('paint-controls', {
     // inline style needs to be forced for text decoration to handle :visited for some reason
-    template: '\n        <div class="PaintControls" :class="{ \'PaintControls--disabled\': !isEnabled }">\n            <a class="Button Button--reset js-reset" :class="{ \'Button--disabled\': !isEnabled }">\n                Paint another\n            </a>\n            <a class="Button Button--download js-download" download="painted-world.png" style="text-decoration:none" :class="{ \'Button--disabled\': !isEnabled }">\n                Download\n            </a>\n            <label class="Checkbox Checkbox--messy"\n                for="messy"\n                :class="{ \'Checkbox--disabled\': !isEnabled }"\n            >\n                <input class="Checkbox-field" type="checkbox" id="messy"\n                    @click="updateMessy"\n                    checked>\n                <span class="Checkbox-box"></span>\n                <span class="Checkbox-label">Messy</span>\n            </label>\n            <label class="Checkbox Checkbox--hue"\n                for="hue"\n                :class="{ \'Checkbox--disabled\': !isEnabled }"\n            >\n                <input class="Checkbox-field" type="checkbox" id="hue"\n                    @click="updateHue"\n                    checked>\n                <span class="Checkbox-box"></span>\n                <span class="Checkbox-label">More colours</span>\n            </label>\n        </div>\n    ',
-    props: ['reset', 'download', 'isEnabled', 'ctx'],
+    template: '\n        <div class="PaintControls" :class="{ \'PaintControls--disabled\': !isEnabled }">\n            <a class="Button Button--reset js-resetBtn"\n                :class="{ \'Button--disabled\': !isEnabled }"\n            >\n                <span>Paint another</span>\n            </a>\n            <a class="Button Button--download js-downloadBtn" \n                download="painted-world.png"\n                style="text-decoration:none" \n                :class="{ \n                    \'Button--disabled\': !isEnabled,\n                    \'Button--hidden\': isLogVisible,\n                }"\n                \n            >\n                <span>Download</span>\n            </a>\n            <label class="Checkbox Checkbox--grouped"\n                for="grouped"\n                :class="{ \'Checkbox--disabled\': !isEnabled }"\n            >\n                <input class="Checkbox-field" type="checkbox" id="grouped"\n                    @click="updateGrouped">\n                <span class="Checkbox-box"></span>\n                <span class="Checkbox-label">Group similar <span>categories</span></span>\n            </label>\n        </div>\n    ',
+    props: ['reset', 'download', 'showLog', 'isEnabled', 'isGrouped', 'ctx', 'isLogVisible'],
     data: function data() {
         return {
             resetBtn: null,
             downloadBtn: null,
-            isMessy: true,
             get width() {
                 if (!this.ctx) return 0;
                 return this.ctx.canvas.width;
@@ -467,19 +550,18 @@ var PaintControls = Vue.component('paint-controls', {
                 }
             }.bind(this);
         },
-        updateMessy: function updateMessy(e) {
-            this.$emit('messy-updated', e.target.checked);
-        },
-        updateHue: function updateHue(e) {
-            this.$emit('hue-updated', e.target.checked);
+        updateGrouped: function updateGrouped(e) {
+            this.$emit('grouped-updated', e.target.checked);
         }
     },
     mounted: function mounted() {
-        this.resetBtn = document.querySelector('.js-reset');
-        this.downloadBtn = document.querySelector('.js-download');
+        this.resetBtn = document.querySelector('.js-resetBtn');
+        this.downloadBtn = document.querySelector('.js-downloadBtn');
+        // this.logBtn = document.querySelector('.js-logBtn');
 
         this.resetBtn.addEventListener('mousedown', this.runCb(this.reset));
-        this.downloadBtn.addEventListener('mousedown', this.runCb(this.download));
+        this.downloadBtn.addEventListener('mousedown', this.runCb(this.showLog));
+        // this.logBtn.addEventListener('mousedown', this.runCb(this.showLog));
     }
 });
 
@@ -499,100 +581,63 @@ var generateUUID = function generateUUID() {
 };
 
 function organiseCategories(aggregate, isLimited) {
-    // var groups = {
-    //     'Housing & Utilities': ['Rental', 'Bond repayment', 'Home & garden', 'Home utilities & service'],
-    //     'Food': ['Eating out & take outs', 'Groceries'],
-    //     'Transportation': ['Transport & fuel', 'Vehicle expenses', 'Vehicle repayments'],
-    //     'Investments & RA’s': ['Investments', 'Saving'],
-    //     'Entertainment': ['Entertainment', 'Leisure & sport'],
-    //     'Healthcare': ['Health & medical'],
-    //     'Insurance': ['Insurance'],
-    //     'Fashion & Beauty': ['Personal care', 'Clothing  & shoes'],
-    //     'Internet & phone': ['Cellphone', 'Internet & phone'],
-    //     'Bank Fees & Interest': ['Banks charges & fees'],
-    //     'Holidays & travel': ['Holidays & travel'],
-    //     'Debt Repayments': ['Card payments', 'Loans'],
-    //     'Gifts & Donations':  [ 'Gifts', 'Donations to charity'],
-    //     'ATM & Cash': ['ATM & Cash'],
-    // };
-    // var reversed = {};
-    // // rewrite for simpler lookups
-    // _.map(groups, function (categories, key) {
-    //     _.map(categories, function (cat) {
-    //         reversed[cat] = key;
-    //     });
-    //
-    //     return categories;
-    //
-    // });
-    // console.log(JSON.stringify(reversed, null, '    '));
-
-    var categoryLookup = {
-        "Rental": "Housing & Utilities",
-        "Bond repayment": "Housing & Utilities",
-        "Home & garden": "Housing & Utilities",
-        "Home utilities & service": "Housing & Utilities",
-        "Eating out & take outs": "Food",
-        "Groceries": "Food",
-        "Transport & fuel": "Transportation",
-        "Vehicle expenses": "Transportation",
-        "Vehicle repayments": "Transportation",
-        "Investments": "Investments & RA’s",
-        "Saving": "Investments & RA’s",
-        "Entertainment": "Entertainment",
-        "Leisure & sport": "Entertainment",
-        "Health & medical": "Healthcare",
-        "Insurance": "Insurance",
-        "Personal care": "Fashion & Beauty",
-        "Clothing  & shoes": "Fashion & Beauty",
-        "Cellphone": "Internet & phone",
-        "Internet & phone": "Internet & phone",
-        "Banks charges & fees": "Bank Fees & Interest",
-        "Holidays & travel": "Holidays & travel",
-        "Card payments": "Debt Repayments",
-        "Loans": "Debt Repayments",
-        "Gifts": "Gifts & Donations",
-        "Donations to charity": "Gifts & Donations",
-        "ATM & Cash": "ATM & Cash"
+    var OTHER_PERCENT = 0; // groups below this are moved into other
+    var OTHER_GROUP_NAME = 'Other'; // groups below this are moved into other
+    var categoryMapping = {
+        'Housing & Utilities': ['Rental', 'Bond repayment', 'Home & garden', 'Home utilities & service'],
+        'Food': ['Eating out & take outs', 'Groceries'],
+        'Transportation': ['Transport & fuel', 'Vehicle expenses', 'Vehicle repayments'],
+        'Investments & RA’s': ['Investments', 'Saving'],
+        'Entertainment': ['Entertainment', 'Leisure & sport'],
+        'Healthcare': ['Health & medical'],
+        'Insurance': ['Insurance'],
+        'Fashion & Beauty': ['Personal care', 'Clothing  & shoes'],
+        'Internet & phone': ['Cellphone', 'Internet & phone'],
+        'Bank Fees & Interest': ['Banks charges & fees'],
+        'Holidays & travel': ['Holidays & travel'],
+        'Debt Repayments': ['Card payments', 'Loans'],
+        'Gifts & Donations': ['Gifts', 'Donations to charity'],
+        'ATM & Cash': ['ATM & Cash']
     };
-    // var now = moment();
-    // TODO start of 12 months ago
-    var yearStart = +moment().subtract(12, 'months').startOf('year');
+    var categoryLookup = {};
+
+    // rewrite for simpler lookups. 
+    // Hashmap with txn category as key, name of lookup as value e.g.
+    // `{"Rental": "Housing & Utilities", "Bond repayment": "Housing & Utilities"}`
+    _.map(categoryMapping, function (categories, key) {
+        _.map(categories, function (cat) {
+            categoryLookup[cat] = key;
+        });
+
+        return categories;
+    });
+
     var groups = {};
+    var categorize = function categorize(groups, groupName, txn) {
+        if (txn.spendingGroupName === 'Transfers') {
+            return;
+        }
+        if (!groups.hasOwnProperty(groupName)) {
+            groups[groupName] = [txn];
+        } else {
+            groups[groupName].push(txn);
+        }
+    };
 
     if (isLimited) {
         _.map(aggregate.transactions, function (txn) {
-            var group = categoryLookup[txn.categoryName];
-            if (txn.spendingGroupName === 'Transfers') {
-                return;
-            }
-            if (!group) {
-                group = 'Other';
+            var groupName = categoryLookup[txn.categoryName];
+            if (!groupName) {
+                groupName = OTHER_GROUP_NAME;
                 // return;
             }
-            if (txn.transactionDate < yearStart) {
-                return;
-            }
-            if (!groups.hasOwnProperty(group)) {
-                groups[group] = [txn];
-            } else {
-                groups[group].push(txn);
-            }
+            categorize(groups, groupName, txn);
+            // groups[groupName].contains.push(txn.categoryName);
         });
     } else {
         _.map(aggregate.transactions, function (txn) {
-            var group = txn.categoryName;
-            if (txn.spendingGroupName === 'Transfers') {
-                return;
-            }
-            if (txn.transactionDate < yearStart) {
-                return;
-            }
-            if (!groups.hasOwnProperty(group)) {
-                groups[group] = [txn];
-            } else {
-                groups[group].push(txn);
-            }
+            var groupName = txn.categoryName;
+            categorize(groups, groupName, txn);
         });
     }
 
@@ -600,32 +645,50 @@ function organiseCategories(aggregate, isLimited) {
 
     _.map(groups, function (group, name) {
         var total = _.reduce(group, function (subtotal, txn) {
-            if (txn.amount.debitOrCredit === 'debit') return subtotal + txn.amount.amount;
+            if (txn.amount.debitOrCredit === 'debit') {
+                return subtotal + txn.amount.amount;
+            }
             return subtotal;
         }, 0);
         allGroupsTotal += total;
+
+        // just grab first transaction to get rest of names in group
+        var contains = categoryLookup[group[0].categoryName];
+        // get list from mapping
+        contains = categoryMapping[contains];
+
         groups[name] = {
-            total: total
+            name: name,
+            total: total,
+            contains: contains
         };
     });
-
-    groups = _.filter(groups, function (group, name) {
-        group.name = name;
-        return group.total > 1;
-    });
-
     _.map(groups, function (group) {
         group.percent = Math.round(group.total / allGroupsTotal * 100);
+        if (group.percent <= OTHER_PERCENT) {
+            if (!groups.hasOwnProperty(OTHER_GROUP_NAME)) {
+                groups[OTHER_GROUP_NAME] = {
+                    name: OTHER_GROUP_NAME,
+                    total: group.total,
+                    percent: group.percent
+                };
+            } else {
+                groups[OTHER_GROUP_NAME].total += group.total;
+                groups[OTHER_GROUP_NAME].percent += group.percent;
+            }
+            delete groups[group.name];
+        }
     });
-    // _.map(groups, function (g) {
-    //     console.log(g.name, '=', g.percent);
-    // });
-    // console.log('GROUPS', groups);
+
+    groups = _.filter(groups, function (group) {
+        return group.total > 0 || group.name === OTHER_GROUP_NAME;
+    });
+
     return groups;
 }
 
 // Fisher-Yates https://www.frankmitchell.org/2015/01/fisher-yates/
-function shuffle$1(array) {
+function shuffle(array) {
     var i = 0;
     var j = 0;
     var temp = null;
@@ -639,9 +702,12 @@ function shuffle$1(array) {
 }
 var INTERACTION_OFFSET_Y = 70;
 var PAINT_TIME = 2000;
+var MAX_LOGGED_ITEMS = 16;
+var WIDTH = 900;
+var HEIGHT = 800;
 var PaintedWorld = Vue.component('painted-world', {
     // inline style needs to be forced for text decoration to handle :visited for some reason
-    template: '\n        <div class="Painting">\n            <div class="js-painted-world PaintedWorld">\n                <div class="Offscreen js-offscreen"></div>\n                <div class="js-canvas"></div>\n                <paint-controls\n                    :reset="reset"\n                    :download="download"\n                    :isEnabled="canInteract"\n                    :ctx="ctx"\n                    v-on:messy-updated="onMessyUpdated"\n                    v-on:hue-updated="onHueUpdated"\n                >\n                </paint-controls>\n                <div class="js-overlay"></div>\n            </div>\n            <div class="Log js-log"></div>\n        </div>\n    ',
+    template: '\n        <div class="Painting">\n            <div class="js-painted-world PaintedWorld">\n                <div class="Offscreen js-offscreen"></div>\n                <div class="js-canvas"></div>\n                <paint-controls\n                    :reset="reset"\n                    :download="download"\n                    :showLog="showLog"\n                    :isGrouped="isGrouped"\n                    :isEnabled="canInteract"\n                    :isLogVisible="isLogVisible"\n                    :ctx="ctx"\n                    v-on:grouped-updated="onGroupedUpdated"\n                >\n                </paint-controls>\n                <div class="js-overlay"></div>\n            </div>\n            <div class="Log js-log"\n                :class="{\n                     \'Log--visible\': isLogVisible\n                }">\n                <a class="Button Button--close" @click="closeLog">Close</a>\n                <div class="Log-preview js-log-preview"></div>\n            </div>\n        </div>\n    ',
     props: ['data', 'images'],
     data: function data() {
         return {
@@ -658,23 +724,23 @@ var PaintedWorld = Vue.component('painted-world', {
             //     canvases: [],
             // },
             painter: null,
-            isMessy: true,
+            isGrouped: false,
             isHueShiftAllowed: true,
-            percentLoaded: 0
-        };
+            percentLoaded: 0,
+            isLogVisible: false,
+            repaintOnComplete: false, // for repainting on window resize
+            paintOptions: {},
+            lastWidth: 0 };
     },
 
     methods: {
-        onMessyUpdated: function onMessyUpdated(val) {
-            this.isMessy = val;
-        },
-
-        onHueUpdated: function onHueUpdated(val) {
-            console.log('isHueShiftAllowed', val);
-            this.isHueShiftAllowed = val;
+        onGroupedUpdated: function onGroupedUpdated(val) {
+            this.isGrouped = val;
+            this.reset();
         },
 
         reset: function reset() {
+            this.paintOptions = {};
             this.createLayout();
             this.paint();
         },
@@ -690,7 +756,62 @@ var PaintedWorld = Vue.component('painted-world', {
             this.canInteract = isAllowed;
         },
 
-        paint: function paint() {
+        // downloadPrevious: function (e) {
+        //     var ctx = e.currentTarget.querySelector('.Preview-image');
+        //     // this.ctx.globalCompositeOperation = 'source-over';
+        //     // this.ctx.drawImage(e.currentTarget.querySelector('.Preview-image'), 0, 0, this.width, this.height);
+
+        //     var container = d3.select(e.currentTarget);
+        // },
+
+        saveToLog: function saveToLog() {
+            var imgData = this.ctx.canvas.toDataURL('image/png');
+            var container = d3.select('.js-log-preview').insert('div', ':first-child').attr({
+                'class': 'Preview'
+            });
+
+            var img = container.append('img').attr({
+                src: imgData,
+                'class': 'Preview-image'
+            });
+
+            container.append('a').attr({
+                download: 'painted-world.png',
+                'class': 'Preview-download js-download'
+            }).append('span').attr({
+                'class': 'Preview-downloadText'
+            }).text('Download');
+
+            // dataURL is expensive to hover over/out (decodes image, resolves address), so only add the url on click
+            var downloadBtn = container.select('.js-download');
+            downloadBtn.on('click', function () {
+                downloadBtn.attr({
+                    'href': imgData
+                });
+                // turn it off again to regain performance
+                setTimeout(function () {
+                    downloadBtn.attr({
+                        'href': ''
+                    });
+                }, 1);
+            });
+
+            var previewElList = document.querySelectorAll('.Preview');
+            if (previewElList.length > MAX_LOGGED_ITEMS) {
+                var previewEl = previewElList[previewElList.length - 1];
+                container.select('.js-download').on('click', null);
+                previewEl.remove();
+            }
+        },
+
+        paint: function paint(repaintPrevious) {
+            var opts = this.paintOptions;
+            opts.brushes = this.paintOptions.brushes || [];
+
+            var scale = Math.min(WIDTH, document.body.clientWidth) / WIDTH;
+            this.lastWidth = document.body.clientWidth; // update for resize
+
+            var heightOffset = (HEIGHT - scale * HEIGHT) / 2;
             this.setInteractionAllowed(false);
             this.labeler.cleanup();
             var ctx = this.ctx;
@@ -700,88 +821,104 @@ var PaintedWorld = Vue.component('painted-world', {
 
             ctx.clearRect(0, 0, width, height);
             var i = 0;
-            var colorIndex = Math.floor(Math.random() * this.images.colorThemes.length);
-            var colorTheme = this.images.colorThemes[colorIndex].image;
-            var hues = this.images.colorThemes[colorIndex].hues;
+            var colorIndex = opts.colorIndex != null ? opts.colorIndex : Math.floor(Math.random() * this.images.colorThemes.length);
+            var colorTheme = opts.colorTheme || this.images.colorThemes[colorIndex].image;
+            var hues = opts.hues || this.images.colorThemes[colorIndex].hues;
             var hueShift = 0;
             if (this.isHueShiftAllowed) {
-                hueShift = hues[Math.floor(Math.random() * hues.length)];
+                hueShift = opts.hueShift != null ? opts.hueShift : hues[Math.floor(Math.random() * hues.length)];
             }
-            // console.log('nodes', nodes.length);
-            var canvasTheme = this.images.canvases[Math.floor(Math.random() * this.images.canvases.length)];
+            var canvasTheme = opts.canvasTheme || this.images.canvases[Math.floor(Math.random() * this.images.canvases.length)];
             var count = nodes.length;
+
+            opts.colorIndex = colorIndex;
+            opts.colorTheme = colorTheme;
+            opts.hues = hues;
+            opts.hueShift = hueShift;
+            opts.canvasTheme = canvasTheme;
+
             var onCompletePaint = function () {
                 if (--count <= 0) {
-                    //     ctx.globalCompositeOperation = 'multiply';
-                    //     ctx.drawImage(canvasTheme, 0, 0, this.width, this.height);
-                    //     ctx.globalCompositeOperation = 'source-over';
+                    if (this.repaintOnComplete) {
+                        // this.reset();
+                        this.repaintOnComplete = false;
+                        console.log('repaint', colorIndex);
+                        this.paint(true);
+                        return;
+                    }
+
                     this.setInteractionAllowed(true);
 
                     // save to log
-                    var imgData = this.ctx.canvas.toDataURL('image/png');
-                    var container = d3.select('.js-log').append('div').attr({
-                        'class': 'Preview'
-                    });
-
-                    container.append('img').attr({
-                        src: imgData,
-                        'class': 'Preview-image'
-                    });
-                    container.append('div').attr({
-                        'class': 'Preview-stats'
-                    }).text('color: ' + (colorIndex + 1) + ', hue: ' + hueShift + 'deg');
+                    if (!repaintPrevious) {
+                        this.saveToLog();
+                    }
                 }
             }.bind(this);
 
             // draw canvas at start so it's not so empty while things process
             this.ctx.drawImage(canvasTheme, 0, 0, this.width, this.height);
 
+            // move canvas left to keep painting at center
+            var scalePositionOffset = {
+                x: (WIDTH - WIDTH * scale) / 2
+            };
+            d3.select(this.ctx.canvas).style({ left: -scalePositionOffset.x + 'px' });
+
             for (i = 0; i < nodes.length; i++) {
                 var d = nodes[i];
-                setTimeout(function (d) {
+                setTimeout(function (d, i) {
+                    var savedBrush = opts.brushes[i] || {};
                     return function () {
                         this.painter.paint({
-                            cx: d.x,
-                            cy: d.y,
-                            radius: d.r,
+                            cx: d.x * scale + scalePositionOffset.x, // offset painting to keep it in center for small resizes
+                            cy: d.y * scale + heightOffset,
+                            radius: d.r * scale,
                             colorTheme: colorTheme,
-                            hueShift: hueShift
-                        }, onCompletePaint);
+                            hueShift: hueShift,
+                            colorX: savedBrush.colorX,
+                            colorY: savedBrush.colorY,
+                            brushIndex: savedBrush.brushIndex,
+                            brushAngle: savedBrush.brushAngle
+                        }, onCompletePaint).then(function (brushOptions) {
+                            this.paintOptions.brushes[i] = brushOptions;
+                        }.bind(this));
 
                         this.labeler.write({
                             group: {
                                 name: d.name,
                                 amount: d.size,
-                                percent: d.percent
+                                percent: d.percent,
+                                contains: d.contains
                             },
-                            x: d.x,
-                            y: d.y - INTERACTION_OFFSET_Y,
-                            radius: d.r
+                            scale: scale,
+                            x: d.x * scale,
+                            y: d.y * scale - INTERACTION_OFFSET_Y + heightOffset,
+                            radius: d.r * scale
                         });
                     };
-                }(d).bind(this), Math.random() * PAINT_TIME);
+                }(d, i).bind(this), repaintPrevious ? 0 : Math.random() * PAINT_TIME);
                 // console.log('loading', Math.floor((i + 1) / nodes.length  * 100));
             }
-            if (this.isMessy) {
-                this.speckleCanvas(colorTheme, hueShift);
-            }
+            this.speckleCanvas(colorTheme, hueShift, repaintPrevious);
         },
 
-        speckleCanvas: function speckleCanvas(colorTheme, hueShift) {
+        speckleCanvas: function speckleCanvas(colorTheme, hueShift, repaintPrevious) {
+            var scale = Math.min(WIDTH, document.body.clientWidth) / WIDTH;
             var numSplatters = Math.floor(Math.random() * 40) + 5;
             for (var i = 0; i < numSplatters; i++) {
                 setTimeout(function () {
                     var size = Math.random() * 6 + 1;
 
                     this.painter.paint({
-                        cx: Math.random() * this.width,
+                        cx: Math.random() * this.width * scale,
                         cy: Math.random() * this.height,
                         radius: size,
                         hueShift: hueShift,
                         colorTheme: colorTheme,
                         opacity: size < 3 ? Math.random() * 0.3 + 0.5 : Math.random() * 0.3 + 0.1
                     });
-                }.bind(this), Math.random() * PAINT_TIME / 2);
+                }.bind(this), repaintPrevious ? 0 : Math.random() * PAINT_TIME / 2);
                 // console.log('loading', Math.floor((i + 1) / nodes.length  * 100));
             }
         },
@@ -791,7 +928,7 @@ var PaintedWorld = Vue.component('painted-world', {
             var PADDING = 80;
             var width = this.width;
             var height = this.height;
-            var groups = organiseCategories(aggregateService.data, false);
+            var groups = organiseCategories(aggregateService.data, this.isGrouped);
             var data = {
                 name: 'root',
                 children: _.map(groups, function (group, i) {
@@ -799,13 +936,14 @@ var PaintedWorld = Vue.component('painted-world', {
                     node.name = group.name;
                     node.size = group.total;
                     node.percent = group.percent;
+                    node.contains = group.contains;
                     node.offset = {
                         angle: Math.random() * Math.PI * 2
                     };
                     return node;
                 })
             };
-            shuffle$1(data.children);
+            shuffle(data.children);
 
             var nodes = d3.layout.pack().sort(null)
             // .shuffle()//(a,b)=>b.size-a.size)
@@ -832,8 +970,8 @@ var PaintedWorld = Vue.component('painted-world', {
         setup: function setup() {
 
             var target = this.target;
-            var width = 900; //document.documentElement.clientWidth - margin.left - margin.right;
-            var height = 800;
+            var width = WIDTH; //document.documentElement.clientWidth - margin.left - margin.right;
+            var height = HEIGHT;
 
             var paintedWorld = d3.select('.js-painted-world');
             var canvasContainer = paintedWorld.select('.js-canvas');
@@ -842,7 +980,8 @@ var PaintedWorld = Vue.component('painted-world', {
 
             var dom = canvasContainer.append('canvas').attr({
                 width: width,
-                height: height
+                height: height,
+                'class': 'Canvas'
             }).style({
                 position: 'absolute',
                 top: 0,
@@ -927,8 +1066,16 @@ var PaintedWorld = Vue.component('painted-world', {
                 height: height,
                 labelImages: this.images.labels
             });
-        }
+        },
 
+        closeLog: function closeLog() {
+            console.log('hide');
+            this.isLogVisible = false;
+        },
+        showLog: function showLog() {
+            console.log('show');
+            this.isLogVisible = true;
+        }
     },
     mounted: function mounted() {
         // var data = this.data;
@@ -938,6 +1085,32 @@ var PaintedWorld = Vue.component('painted-world', {
         this.setup();
         this.createLayout();
         this.paint();
+
+        //https://davidwalsh.name/javascript-debounce-function
+        var debounce = function debounce(func, wait, immediate) {
+            var timeout;
+            return function () {
+                var context = this,
+                    args = arguments;
+                var later = function later() {
+                    timeout = null;
+                    if (!immediate) func.apply(context, args);
+                };
+                var callNow = immediate && !timeout;
+                clearTimeout(timeout);
+                timeout = setTimeout(later, wait);
+                if (callNow) func.apply(context, args);
+            };
+        };
+
+        d3.select(window).on('resize', debounce(function () {
+            if (document.body.clientWidth >= WIDTH && this.lastWidth >= WIDTH) return;
+            if (this.canInteract) {
+                this.paint(true);
+            } else {
+                this.repaintOnComplete = true;
+            }
+        }, 300).bind(this));
     }
 });
 
@@ -960,45 +1133,6 @@ var AssetLoader = Vue.component('asset-loader', {
     },
 
     methods: {
-        createLayout: function createLayout() {
-            var PACK_PADDING = 30;
-            var PADDING = 80;
-            var width = 500;
-            var height = 500;
-            var groups = d3.range(20).map(function () {
-                return {
-                    name: group.name,
-                    size: group.total
-                };
-            });
-            var data = {
-                name: 'root',
-                children: groups
-            };
-            shuffle(data.children);
-
-            var nodes = d3.layout.pack().sort(null)
-            // .shuffle()//(a,b)=>b.size-a.size)
-            .size([width - PADDING * 2, height - PADDING * 2]).padding(PACK_PADDING).value(function (d) {
-                return d.size;
-            }).nodes(data);
-
-            // remove root
-            _.remove(nodes, { name: 'root' });
-
-            // offset the circle within padded area for more randomness
-            var getPosition = function getPosition(d, axis) {
-                var trig = Math.sin;
-                if (axis === 'x') trig = Math.cos;
-                return d[axis] + PACK_PADDING * 0.3 * trig(d.offset.angle);
-            };
-            _.map(nodes, function (node) {
-                node.x = getPosition(node, 'x') + PADDING;
-                node.y = getPosition(node, 'y') + PADDING;
-            });
-
-            return nodes;
-        },
 
         draw: function draw(nodes) {
             for (i = 0; i < nodes.length; i++) {
@@ -1007,14 +1141,16 @@ var AssetLoader = Vue.component('asset-loader', {
         },
 
         loadImage: function loadImage(path, cb) {
-            var deferred = Q.defer();
             var img = new Image(); // Create new img element
-            img.addEventListener("load", function () {
-                if (cb) cb();
-                deferred.resolve(img);
-            }.bind(this), false);
-            img.src = './images/' + path;
-            return deferred.promise;
+            var deferred = function (resolve, reject) {
+                img.addEventListener("load", function () {
+                    if (cb) cb();
+                    resolve(img);
+                }.bind(this), false);
+            }.bind(this);
+            var promise = new Promise(deferred);
+            img.src = './images/painted-world/' + path;
+            return promise;
         },
 
         trackProgress: function trackProgress(numAssets, onUpdate) {
@@ -1028,7 +1164,6 @@ var AssetLoader = Vue.component('asset-loader', {
 
         onUpdateMain: function onUpdateMain(percent) {
             this.percentLoaded = Math.floor(percent * 100);
-            console.log('p', this.percentLoaded);
         },
 
         loadAll: function loadAll() {
@@ -1053,7 +1188,7 @@ var AssetLoader = Vue.component('asset-loader', {
 
             var onProgress = this.trackProgress(imagesToLoad.length, this.onUpdateMain);
 
-            var promise = Q.all(_.map(imagesToLoad, function (path) {
+            var promise = Promise.all(_.map(imagesToLoad, function (path) {
                 return this.loadImage(path, onProgress);
             }.bind(this))).then(function (images) {
                 // console.log('done', images);
@@ -1083,10 +1218,9 @@ var AssetLoader = Vue.component('asset-loader', {
                     });
                 }
                 incr = 1;
-                var num = i + incr;
+                num = i + incr;
                 for (; i < num; i++) {
-                    this.images.labels.push('images/label.png');
-                    // this.images.labels.push(images[i]);
+                    this.images.labels.push(images[i]);
                 }
                 for (; i < images.length; i++) {
                     this.images.paintMasks.push(images[i]);
@@ -1099,6 +1233,7 @@ var AssetLoader = Vue.component('asset-loader', {
             return promise;
         },
         onComplete: function onComplete() {
+            console.log('IS COMPLETE');
             this.isLoaded = true;
         }
     },
@@ -1107,93 +1242,16 @@ var AssetLoader = Vue.component('asset-loader', {
     }
 });
 
-var GraphScreen = Vue.component('graph-screen', {
-    template: '\n        <asset-loader></asset-loader>\n    ',
-    props: [],
-    data: {},
-    methods: {}
-});
-
-// import { DashboardItem } from './dashboard-item';
-
-var LoginScreen = Vue.component('login-screen', {
-    template: '\n        <div>\n            <input placeholder="email" v-model="email">\n            <input placeholder="password" type="password" v-model=">\n        </div>\n    ',
-    props: [],
-    data: {},
-    methods: {}
-});
-
-Vue.use(VueRouter);
-
-var routes = [{ name: 'login', path: '/', component: LoginScreen }, { name: 'graph', path: '/graph', component: GraphScreen }];
-
-routes = routes.map(function (route) {
-    route.beforeEnter = function (to, from, next) {
-        window.scroll(0, 0);
-        next();
-    };
-    return route;
-});
-
-var router = new VueRouter({
-    routes: routes
-});
-
-var formatNumber = function formatNumber(value) {
-    if (typeof value === 'undefined') return 0;
-    value = Math.round(value);
-    return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-};
-
-Vue.filter('number', function (value) {
-    return formatNumber(value);
-});
-
-Vue.filter('currency', function (value) {
-    return 'R' + formatNumber(value);
-});
-
-Vue.filter('date', function (value) {
-    return moment(value).format('D MMMM YYYY');
-});
-Vue.filter('dateAgo', function (value, hideAgo) {
-    return moment(value).fromNow(hideAgo);
-});
-
-//
-Vue.filter('fuzzyDatePeriod', function (value, periodType) {
-    var response = '';
-    switch (periodType) {
-        case 'year':
-        case 'years':
-        case 'y':
-            var years = Math.floor(value);
-            var months = Math.round((value - years) * 12);
-
-            if (years > 0) {
-                response += years + ' year' + (years !== 1 ? 's' : '');
-            }
-            if (months > 0) {
-                if (years > 0) {
-                    response += ' and ';
-                }
-                response += months + ' month' + (months !== 1 ? 's' : '');
-            }
-            // response = response.replace(/ /g, '&nbsp;');
-            return response;
-            break;
+var el = document.querySelector('.js-painting');
+var hasLoaded = false;
+aggregateService.load(el).success(function (res) {
+    if (hasLoaded) {
+        return;
     }
-});
-
-// export {};
-
-aggregateService.load().success(function (res) {
+    hasLoaded = true;
     new Vue({
-        router: router,
-        el: '.App',
+        el: '.js-painting',
         data: {},
-        created: function created() {
-            router.push({ name: 'graph' });
-        }
+        created: function created() {}
     });
 });

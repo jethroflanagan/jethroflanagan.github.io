@@ -8,24 +8,27 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="mobile-web-app-capable" content="yes">
         <!-- <link rel="manifest" href="/manifest.json"> -->
-        <link rel="stylesheet" href="styles/styles.css">
+        <link rel="stylesheet" href="styles/painted-world.css">
         <!-- <link href='https://fonts.googleapis.com/css?family=Patrick+Hand' rel='stylesheet' type='text/css'> -->
         <!-- <link href='https://fonts.googleapis.com/css?family=Coming+Soon' rel='stylesheet' type='text/css'> -->
         <link href='https://fonts.googleapis.com/css?family=Titillium+Web' rel='stylesheet' type='text/css'>
 
     </head>
     <body>
-        <div class="App">
-            <router-view></router-view>
+        <div class="PaintedWorldApp js-painting">
+            <asset-loader></asset-loader>
         </div>
+        <script src="scripts/painted-world-vendor.js"></script>
+        <script src="scripts/painted-world-app.js"></script>
 
-        <script src="vendor/jquery.min.js"></script>
-        <script src="vendor/d3.min.js"></script>
-        <script src="vendor/lodash.min.js"></script>
-        <script src="vendor/moment.min.js"></script>
-        <script src="vendor/vue.min.js"></script>
-        <script src="vendor/vue-router.min.js"></script>
-        <script src="vendor/q.js"></script>
-        <script src="scripts/app.js"></script>
+        <script>
+            d3.json('data/aggregate.json', function (data) {
+                document.querySelector('.js-painting')
+                    .dispatchEvent(new CustomEvent('data', {
+                        detail: data,
+                    })
+                );
+            });
+        </script>
     </body>
 </html>
